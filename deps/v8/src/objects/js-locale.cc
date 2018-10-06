@@ -49,12 +49,12 @@ Maybe<bool> InsertOptionsIntoLocale(Isolate* isolate,
   CHECK(isolate);
   CHECK(icu_locale);
 
-  static std::vector<const char*> hour_cycle_values = {"h11", "h12", "h23",
-                                                       "h24"};
-  static std::vector<const char*> case_first_values = {"upper", "lower",
-                                                       "false"};
-  static std::vector<const char*> empty_values = {};
-  static const std::array<OptionData, 6> kOptionToUnicodeTagMap = {
+  const std::vector<const char*> hour_cycle_values = {"h11", "h12", "h23",
+                                                      "h24"};
+  const std::vector<const char*> case_first_values = {"upper", "lower",
+                                                      "false"};
+  const std::vector<const char*> empty_values = {};
+  const std::array<OptionData, 6> kOptionToUnicodeTagMap = {
       {{"calendar", "ca", &empty_values, false},
        {"collation", "co", &empty_values, false},
        {"hourCycle", "hc", &hour_cycle_values, false},
@@ -75,7 +75,7 @@ Maybe<bool> InsertOptionsIntoLocale(Isolate* isolate,
             : Intl::GetStringOption(isolate, options, option_to_bcp47.name,
                                     *(option_to_bcp47.possible_values),
                                     "locale", &value_str);
-    if (maybe_found.IsNothing()) return maybe_found;
+    MAYBE_RETURN(maybe_found, Nothing<bool>());
 
     // TODO(cira): Use fallback value if value is not found to make
     // this spec compliant.
@@ -163,17 +163,16 @@ bool PopulateLocaleWithUnicodeTags(Isolate* isolate, const char* icu_locale,
 }
 }  // namespace
 
-MaybeHandle<JSLocale> JSLocale::InitializeLocale(Isolate* isolate,
-                                                 Handle<JSLocale> locale_holder,
-                                                 Handle<String> locale,
-                                                 Handle<JSReceiver> options) {
+MaybeHandle<JSLocale> JSLocale::Initialize(Isolate* isolate,
+                                           Handle<JSLocale> locale_holder,
+                                           Handle<String> locale,
+                                           Handle<JSReceiver> options) {
   static const char* const kMethod = "Intl.Locale";
   v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate);
   UErrorCode status = U_ZERO_ERROR;
 
   // Get ICU locale format, and canonicalize it.
   char icu_result[ULOC_FULLNAME_CAPACITY];
-  char icu_canonical[ULOC_FULLNAME_CAPACITY];
 
   if (locale->length() == 0) {
     THROW_NEW_ERROR(isolate, NewRangeError(MessageTemplate::kLocaleNotEmpty),
@@ -184,18 +183,20 @@ MaybeHandle<JSLocale> JSLocale::InitializeLocale(Isolate* isolate,
   CHECK_LT(0, bcp47_locale.length());
   CHECK_NOT_NULL(*bcp47_locale);
 
-  int icu_length = uloc_forLanguageTag(
-      *bcp47_locale, icu_result, ULOC_FULLNAME_CAPACITY, nullptr, &status);
+  int parsed_length = 0;
+  int icu_length =
+      uloc_forLanguageTag(*bcp47_locale, icu_result, ULOC_FULLNAME_CAPACITY,
+                          &parsed_length, &status);
 
-  if (U_FAILURE(status) || status == U_STRING_NOT_TERMINATED_WARNING ||
-      icu_length == 0) {
+  if (U_FAILURE(status) ||
+      parsed_length < static_cast<int>(bcp47_locale.length()) ||
+      status == U_STRING_NOT_TERMINATED_WARNING || icu_length == 0) {
     THROW_NEW_ERROR(
         isolate,
         NewRangeError(MessageTemplate::kLocaleBadParameters,
                       isolate->factory()->NewStringFromAsciiChecked(kMethod),
                       locale_holder),
         JSLocale);
-    return MaybeHandle<JSLocale>();
   }
 
   Maybe<bool> error = InsertOptionsIntoLocale(isolate, options, icu_result);
@@ -207,40 +208,26 @@ MaybeHandle<JSLocale> JSLocale::InitializeLocale(Isolate* isolate,
                       isolate->factory()->NewStringFromAsciiChecked(kMethod),
                       locale_holder),
         JSLocale);
-    return MaybeHandle<JSLocale>();
   }
-  DCHECK(error.FromJust());
 
-  uloc_canonicalize(icu_result, icu_canonical, ULOC_FULLNAME_CAPACITY, &status);
-  if (U_FAILURE(status) || status == U_STRING_NOT_TERMINATED_WARNING) {
+  if (!PopulateLocaleWithUnicodeTags(isolate, icu_result, locale_holder)) {
     THROW_NEW_ERROR(
         isolate,
         NewRangeError(MessageTemplate::kLocaleBadParameters,
                       isolate->factory()->NewStringFromAsciiChecked(kMethod),
                       locale_holder),
         JSLocale);
-    return MaybeHandle<JSLocale>();
-  }
-
-  if (!PopulateLocaleWithUnicodeTags(isolate, icu_canonical, locale_holder)) {
-    THROW_NEW_ERROR(
-        isolate,
-        NewRangeError(MessageTemplate::kLocaleBadParameters,
-                      isolate->factory()->NewStringFromAsciiChecked(kMethod),
-                      locale_holder),
-        JSLocale);
-    return MaybeHandle<JSLocale>();
   }
 
   // Extract language, script and region parts.
   char icu_language[ULOC_LANG_CAPACITY];
-  uloc_getLanguage(icu_canonical, icu_language, ULOC_LANG_CAPACITY, &status);
+  uloc_getLanguage(icu_result, icu_language, ULOC_LANG_CAPACITY, &status);
 
   char icu_script[ULOC_SCRIPT_CAPACITY];
-  uloc_getScript(icu_canonical, icu_script, ULOC_SCRIPT_CAPACITY, &status);
+  uloc_getScript(icu_result, icu_script, ULOC_SCRIPT_CAPACITY, &status);
 
   char icu_region[ULOC_COUNTRY_CAPACITY];
-  uloc_getCountry(icu_canonical, icu_region, ULOC_COUNTRY_CAPACITY, &status);
+  uloc_getCountry(icu_result, icu_region, ULOC_COUNTRY_CAPACITY, &status);
 
   if (U_FAILURE(status) || status == U_STRING_NOT_TERMINATED_WARNING) {
     THROW_NEW_ERROR(
@@ -249,7 +236,6 @@ MaybeHandle<JSLocale> JSLocale::InitializeLocale(Isolate* isolate,
                       isolate->factory()->NewStringFromAsciiChecked(kMethod),
                       locale_holder),
         JSLocale);
-    return MaybeHandle<JSLocale>();
   }
 
   Factory* factory = isolate->factory();
@@ -271,8 +257,7 @@ MaybeHandle<JSLocale> JSLocale::InitializeLocale(Isolate* isolate,
   }
 
   char icu_base_name[ULOC_FULLNAME_CAPACITY];
-  uloc_getBaseName(icu_canonical, icu_base_name, ULOC_FULLNAME_CAPACITY,
-                   &status);
+  uloc_getBaseName(icu_result, icu_base_name, ULOC_FULLNAME_CAPACITY, &status);
   // We need to convert it back to BCP47.
   char bcp47_result[ULOC_FULLNAME_CAPACITY];
   uloc_toLanguageTag(icu_base_name, bcp47_result, ULOC_FULLNAME_CAPACITY, true,
@@ -284,13 +269,12 @@ MaybeHandle<JSLocale> JSLocale::InitializeLocale(Isolate* isolate,
                       isolate->factory()->NewStringFromAsciiChecked(kMethod),
                       locale_holder),
         JSLocale);
-    return MaybeHandle<JSLocale>();
   }
   Handle<String> base_name = factory->NewStringFromAsciiChecked(bcp47_result);
   locale_holder->set_base_name(*base_name);
 
   // Produce final representation of the locale string, for toString().
-  uloc_toLanguageTag(icu_canonical, bcp47_result, ULOC_FULLNAME_CAPACITY, true,
+  uloc_toLanguageTag(icu_result, bcp47_result, ULOC_FULLNAME_CAPACITY, true,
                      &status);
   if (U_FAILURE(status) || status == U_STRING_NOT_TERMINATED_WARNING) {
     THROW_NEW_ERROR(
@@ -299,7 +283,6 @@ MaybeHandle<JSLocale> JSLocale::InitializeLocale(Isolate* isolate,
                       isolate->factory()->NewStringFromAsciiChecked(kMethod),
                       locale_holder),
         JSLocale);
-    return MaybeHandle<JSLocale>();
   }
   Handle<String> locale_handle =
       factory->NewStringFromAsciiChecked(bcp47_result);
@@ -310,20 +293,37 @@ MaybeHandle<JSLocale> JSLocale::InitializeLocale(Isolate* isolate,
 
 namespace {
 
-Handle<String> MorphLocale(Isolate* isolate, String* input,
+Handle<String> MorphLocale(Isolate* isolate, String* language_tag,
                            int32_t (*morph_func)(const char*, char*, int32_t,
                                                  UErrorCode*)) {
   Factory* factory = isolate->factory();
   char localeBuffer[ULOC_FULLNAME_CAPACITY];
+  char morphBuffer[ULOC_FULLNAME_CAPACITY];
+
   UErrorCode status = U_ZERO_ERROR;
-  DCHECK_NOT_NULL(morph_func);
-  int32_t length = (*morph_func)(input->ToCString().get(), localeBuffer,
-                                 ULOC_FULLNAME_CAPACITY, &status);
+  // Convert from language id to locale.
+  int32_t parsed_length;
+  int32_t length =
+      uloc_forLanguageTag(language_tag->ToCString().get(), localeBuffer,
+                          ULOC_FULLNAME_CAPACITY, &parsed_length, &status);
+  CHECK(parsed_length == language_tag->length());
   DCHECK(U_SUCCESS(status));
   DCHECK_GT(length, 0);
-  std::string locale(localeBuffer, length);
-  std::replace(locale.begin(), locale.end(), '_', '-');
-  return factory->NewStringFromAsciiChecked(locale.c_str());
+  DCHECK_NOT_NULL(morph_func);
+  // Add the likely subtags or Minimize the subtags on the locale id
+  length =
+      (*morph_func)(localeBuffer, morphBuffer, ULOC_FULLNAME_CAPACITY, &status);
+  DCHECK(U_SUCCESS(status));
+  DCHECK_GT(length, 0);
+  // Returns a well-formed language tag
+  length = uloc_toLanguageTag(morphBuffer, localeBuffer, ULOC_FULLNAME_CAPACITY,
+                              false, &status);
+  DCHECK(U_SUCCESS(status));
+  DCHECK_GT(length, 0);
+  std::string lang(localeBuffer, length);
+  std::replace(lang.begin(), lang.end(), '_', '-');
+
+  return factory->NewStringFromAsciiChecked(lang.c_str());
 }
 
 }  // namespace
